@@ -7,6 +7,7 @@ import chisel3._
 import chisel3.iotesters._
 import chisel3.util.Cat
 import freechips.rocketchip.instrumenter.BpfLoader.{BpfInsn, BpfProg}
+import freechips.rocketchip.util._
 import org.scalatest.{FlatSpec, Matchers}
 
 object CircuitConstructorSpec {
@@ -40,7 +41,7 @@ object CircuitConstructorSpec {
         val shiftedBytes = (0 until (1 << lgsize)).map { i =>
           mem.read(addr + i.U, valid).asUInt()
         }
-        (Cat(shiftedBytes.reverse), RegNext(valid))
+        (Cat(shiftedBytes.reverse) holdUnless RegNext(valid), RegNext(RegNext(RegNext(valid))))
       }
 
       override def doStore(addr: UInt, lgsize: Int, data: UInt, valid: Bool): Bool = {
@@ -49,7 +50,7 @@ object CircuitConstructorSpec {
             mem.write(addr + i.U, (data >> (i * 8))(7, 0))
           }
         }
-        RegNext(valid)
+        RegNext(RegNext(RegNext(valid)))
       }
 
       override def resolveSymbol(sym: BpfLoader.Symbol): UInt = 12.U
@@ -182,7 +183,7 @@ class CircuitConstructorSpec extends FlatSpec with Matchers {
       BpfInsn(0x72, 1, 0, 0, Left(0xabc)), // *(uint8_t *)(r1 + 0) = 0xbc
       BpfInsn(0xb4, 1, 0, 0, Left(10)),    // r1 = 10
       BpfInsn(0x73, 1, 3, 12, Left(0xabc)), // *(uint8_t *)(r1 + 12) = r3
-    )((1, 2, 3), 0, 1,
+    )((1, 2, 3), 0, 3,
       1 -> 0xbc,
       22 -> 3
     )
@@ -193,7 +194,7 @@ class CircuitConstructorSpec extends FlatSpec with Matchers {
       BpfInsn(0x71, 1, 1, 1,  Left(0)),    // r1 = *(uint8_t *)(r1 + 1)
       BpfInsn(0x07, 1, 0, 0,  Left(0xab)), // r1 += 0xab
       BpfInsn(0x73, 2, 1, 10, Left(0)),    // *(uint8_t *)(r2 + 10) = r1
-    )((1, 2, 3), 0, 2,
+    )((1, 2, 3), 0, 6,
       12 -> 0xab
     )
   }
