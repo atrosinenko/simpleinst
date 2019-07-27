@@ -1,19 +1,33 @@
 package freechips.rocketchip.instrumenter
 
+import Chisel.BitPat
 import chisel3._
-import freechips.rocketchip.config.Parameters
+import freechips.rocketchip.config.{Field, Parameters}
 import freechips.rocketchip.instrumenter.BpfLoader.{BpfInsn, BpfProg}
 import freechips.rocketchip.rocket._
 import freechips.rocketchip.tile.{LazyRoCC, LazyRoCCModuleImp, OpcodeSet}
 import freechips.rocketchip.util._
 
+import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
+
 object SimpleInstRoCC {
-  def fetchInstructions(bpfObject: String): Map[Int, Seq[BpfInsn]] = {
+  final case class BpfDescriptions(instructions: Map[Int, Seq[BpfInsn]], instrumentations: Seq[OpcodeHandler])
+  def fetchInstructions(bpfObject: String): BpfDescriptions = {
     val srcs = BpfLoader.fetchProgs(bpfObject)
-    srcs.map {
+    val instructions = ArrayBuffer[(Int, Seq[BpfInsn])]()
+    val instrumentations = ArrayBuffer[OpcodeHandler]()
+    srcs.foreach {
       case BpfProg(name, insns) if name.startsWith("funct") =>
-        name.substring(5).toInt -> insns
-    }.toMap
+        instructions += name.substring(5).toInt -> insns
+      case BpfProg(name, insns) if name.startsWith("inst") =>
+        val key = name.substring(4)
+        val pat = Instructions.getClass.getMethod(key).invoke(Instructions).asInstanceOf[BitPat]
+        val funct = instrumentations.length | (1 << 6)
+        instructions += funct -> insns
+        instrumentations += OpcodeHandler(pat, funct)
+    }
+    BpfDescriptions(instructions = instructions.toMap, instrumentations = instrumentations)
   }
 }
 
