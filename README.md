@@ -41,10 +41,10 @@ uint64_t instMUL()
 * It only supports functions with linear control flow (and probably static forward-only in the near future)
 * Input snippets should be compiled into eBPF Little endian object files
 * `COMMON` symbols are supported given they are scalars of no more than 8 bytes each
-** `static` variables are not supported yet
+* * `static` variables are not supported yet
 * Memory accesses through pointer dereferences are supported
-** memory can be **updated**: "internal" data dependencies (something is placed into an eBPF register, updated, then written somewhere) are respected
-** no byte can be accessed inside the single instruction without natural "internally traceable" ordering (`*ptr1 += 1; *ptr2 = *ptr1 + 1; *ptr1 = *ptr2 * 2;` is considered undefined behavior)
+* * memory can be **updated**: "internal" data dependencies (something is placed into an eBPF register, updated, then written somewhere) are respected
+* * no byte can be accessed inside the single instruction without natural "internally traceable" ordering (`*ptr1 += 1; *ptr2 = *ptr1 + 1; *ptr1 = *ptr2 * 2;` is considered undefined behavior)
 * invalid memory accesses are handled only via watchdog yet :(
 
 ## Usage
