@@ -55,16 +55,19 @@ class SimpleInstRoCCImp(outer: SimpleInstRoCC)(implicit p: Parameters) extends L
 
   io.mem.req.valid := false.B
   io.mem.req.bits.phys := false.B
+
+  val regs = mutable.Map[String, UInt]()
+
   class Constructor extends BpfCircuitConstructor {
     val serializer = new Serializer(isComputing, io.mem.req.fire())
-    override def doLoad(addr: UInt, lgsize: Int, valid: Bool): (UInt, Bool) = {
+    override def doMemLoad(addr: UInt, tpe: LdStType, valid: Bool): (UInt, Bool) = {
       val (doReq, thisTag) = serializer.nextReq(valid)
       when (doReq) {
         io.mem.req.bits.addr := addr
         require((1 << io.mem.req.bits.tag.getWidth) > thisTag)
         io.mem.req.bits.tag := thisTag.U
         io.mem.req.bits.cmd := M_XRD
-        io.mem.req.bits.typ := (4 | lgsize).U
+        io.mem.req.bits.typ := (4 | tpe.lgsize).U
         io.mem.req.bits.data := 0.U
         io.mem.req.valid := true.B
       }
@@ -77,20 +80,23 @@ class SimpleInstRoCCImp(outer: SimpleInstRoCC)(implicit p: Parameters) extends L
 
       (io.mem.resp.bits.data holdUnless doResp, serializer.monotonic(doResp))
     }
-    override def doStore(addr: UInt, lgsize: Int, data: UInt, valid: Bool): Bool = {
+    override def doMemStore(addr: UInt, tpe: LdStType, data: UInt, valid: Bool): Bool = {
       val (doReq, thisTag) = serializer.nextReq(valid)
       when (doReq) {
         io.mem.req.bits.addr := addr
         require((1 << io.mem.req.bits.tag.getWidth) > thisTag)
         io.mem.req.bits.tag := thisTag.U
         io.mem.req.bits.cmd := M_XWR
-        io.mem.req.bits.typ := (4 | lgsize).U
+        io.mem.req.bits.typ := (4 | tpe.lgsize).U
         io.mem.req.bits.data := data
         io.mem.req.valid := true.B
       }
       serializer.monotonic(doReq && io.mem.req.fire())
     }
-    override def resolveSymbol(sym: BpfLoader.Symbol): UInt = ???
+    override def resolveSymbol(sym: BpfLoader.Symbol): Resolved = sym match {
+      case BpfLoader.Symbol(symName, _, size, ElfConstants.Elf64_Shdr.SHN_COMMON, false) if size <= 8 =>
+        RegisterReference(regs.getOrElseUpdate(symName, RegInit(0.U(64.W))))
+    }
   }
 
   outer.insns.foreach {

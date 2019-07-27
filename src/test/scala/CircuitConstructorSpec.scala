@@ -13,16 +13,17 @@ import org.scalatest.{FlatSpec, Matchers}
 object CircuitConstructorSpec {
   val MemLengthLg = 5
   val MemLength = 1 << MemLengthLg
-  class DUT(program: BpfProg) extends Module {
+  val MemInit = 0xaa
+  class DUT(programs: Seq[Seq[BpfInsn]]) extends Module {
     override val io = IO(new Bundle {
-      val valid = Input(Bool())
-      val ready = Output(Bool())
 
       val arg1 = Input(UInt(64.W))
       val arg2 = Input(UInt(64.W))
       val arg3 = Input(UInt(64.W))
 
-      val result = Output(UInt(64.W))
+      val valid = Input(Vec(programs.length, Bool()))
+      val ready = Output(Vec(programs.length, Bool()))
+      val result = Output(Vec(programs.length, UInt(64.W)))
 
       val readAddr = Input(UInt(5.W))
       val readResult = Output(UInt(8.W))
@@ -33,65 +34,106 @@ object CircuitConstructorSpec {
     val memInitInd = RegInit(0.U((MemLengthLg + 1).W))
     memInitInd := Mux(memInitInd < MemLength.U, memInitInd + 1.U, memInitInd)
     when (memInitInd < MemLength.U) {
-      mem.write(memInitInd, 0.U)
+      mem.write(memInitInd, MemInit.U)
     }
 
     object Constructor extends BpfCircuitConstructor {
-      override def doLoad(addr: UInt, lgsize: Int, valid: Bool): (UInt, Bool) = {
-        val shiftedBytes = (0 until (1 << lgsize)).map { i =>
+      override def doMemLoad(addr: UInt, tpe: LdStType, valid: Bool): (UInt, Bool) = {
+        val shiftedBytes = (0 until (1 << tpe.lgsize)).map { i =>
           mem.read(addr + i.U, valid).asUInt()
         }
-        (Cat(shiftedBytes.reverse) holdUnless RegNext(valid), RegNext(RegNext(RegNext(valid))))
+        when (RegNext(posedge(valid))) {
+          printf("load %d: %x\n", addr, Cat(shiftedBytes.reverse))
+        }
+        (Cat(shiftedBytes.reverse) holdUnless RegNext(posedge(valid)), RegNext(RegNext(RegNext(valid))))
       }
 
-      override def doStore(addr: UInt, lgsize: Int, data: UInt, valid: Bool): Bool = {
-        (0 until (1 << lgsize)).foreach { i =>
-          when (valid) {
+      override def doMemStore(addr: UInt, tpe: LdStType, data: UInt, valid: Bool): Bool = {
+        (0 until (1 << tpe.lgsize)).foreach { i =>
+          when (posedge(valid)) {
             mem.write(addr + i.U, (data >> (i * 8))(7, 0))
           }
+        }
+        when (posedge(valid)) {
+          printf("store %d <- %x\n", addr, data)
         }
         RegNext(RegNext(RegNext(valid)))
       }
 
-      override def resolveSymbol(sym: BpfLoader.Symbol): UInt = 12.U
+      val regA = RegInit(0.U(64.W))
+      val regB = RegInit(0.U(64.W))
+      val regC = RegInit(0.U(64.W))
+      val regD = RegInit(0.U(64.W))
+      val regAddr = RegInit(0.U(64.W))
+      override def resolveSymbol(sym: BpfLoader.Symbol): Resolved = sym match {
+        case BpfLoader.Symbol("a", _, _, _, _) =>
+          RegisterReference(regA)
+        case BpfLoader.Symbol("b", _, _, _, _) =>
+          RegisterReference(regB)
+        case BpfLoader.Symbol("c", _, _, _, _) =>
+          RegisterReference(regC)
+        case BpfLoader.Symbol("d", _, _, _, _) =>
+          RegisterReference(regC)
+        case BpfLoader.Symbol("addr", _, _, _, _) =>
+          RegisterReference(regAddr)
+        case BpfLoader.Symbol(_, value, _, shndx, _) if shndx != ElfConstants.Elf64_Shdr.SHN_COMMON =>
+          Value(value.U)
+      }
     }
 
-    val (result, resultValid) = Constructor.processProgram(
-      io.valid,
-      program.insns,
-      io.arg1, io.arg2, io.arg3
-    )
-
     io.readResult := mem.read(io.readAddr)
-    io.result := result
-    io.ready := resultValid
+
+    programs.zipWithIndex.foreach {
+      case (prog, ind) =>
+        val (result, resultValid) = Constructor.processProgram(
+          io.valid(ind),
+          prog,
+          io.arg1, io.arg2, io.arg3
+        )
+
+        io.result(ind) := result
+        io.ready(ind) := resultValid
+    }
 
   }
 
-  class CircuitTester(dut: DUT, result: BigInt, steps: Int, arg1: BigInt, arg2: BigInt, arg3: BigInt, memContents: Seq[Int]) extends PeekPokeTester(dut) {
-    poke(dut.io.readAddr, 0)
-    poke(dut.io.valid, false)
+  class CircuitTester(dut: DUT, resultsAndSteps: Seq[(BigInt, Int)], arg1: BigInt, arg2: BigInt, arg3: BigInt, memContents: Seq[Int]) extends PeekPokeTester(dut) {
+    resultsAndSteps.indices.foreach { ind =>
+      poke(dut.io.valid(ind), false)
+    }
+    step(100) // clear memory
+
     poke(dut.io.arg1, arg1)
     poke(dut.io.arg2, arg2)
     poke(dut.io.arg3, arg3)
 
-    step(100)
+    resultsAndSteps.zipWithIndex.foreach { case ((result, steps), i) =>
 
-    expect(peek(dut.io.ready) == 0, "Circuit should not start on its own")
+      step(100)
 
-    poke(dut.io.valid, true)
+      expect(peek(dut.io.ready(i)) == 0, "Circuit should not start on its own")
 
-    if (steps > 0) {
-      step(steps - 1)
-      expect(peek(dut.io.ready) == 0, s"Circuit should not finish its calculations before ${steps}th step")
+      poke(dut.io.valid(i), true)
+
+      if (steps > 0) {
+        step(steps - 1)
+        expect(peek(dut.io.ready(i)) == 0, s"Circuit should not finish its calculations before ${steps}th step")
+      } else {
+        step(-steps)
+      }
+
+      step(1)
+
+      if (steps >= 0) {
+        expect(peek(dut.io.ready(i)) == 1, s"Circuit should finish its calculations on ${steps}th step")
+      }
+
+      val realResult = peek(dut.io.result(i))
+      expect(realResult == result, s"Result should be $result, got $realResult")
+
+      step(10)
+      poke(dut.io.valid(i), false)
     }
-
-    step(1)
-
-    expect(peek(dut.io.ready) == 1, s"Circuit should finish its calculations on ${steps}th step")
-
-    val realResult = peek(dut.io.result)
-    expect(realResult == result, s"Result should be $result, got $realResult")
 
     memContents.zipWithIndex.foreach {
       case (byte, ind) =>
@@ -101,8 +143,6 @@ object CircuitConstructorSpec {
         expect((realByte & 0xFF) == (byte & 0xFF), s"Byte #$ind should be $byte, got $realByte")
     }
   }
-
-
 }
 
 class CircuitConstructorSpec extends FlatSpec with Matchers {
@@ -110,29 +150,44 @@ class CircuitConstructorSpec extends FlatSpec with Matchers {
 
   behavior of "CircuitConstructor"
 
-  def testWith(insns: BpfInsn*)(args: (BigInt, BigInt, BigInt), result: BigInt, steps: Int, sparseMemContents: (Int, Int)*): Unit = {
+  def testWith(progs: BpfInsn*)(args: (BigInt, BigInt, BigInt), result: BigInt, steps: Int, sparseMemContents: (Int, Int)*): Unit = {
     val mem = sparseMemContents.toMap
-    val memContents = (0 until MemLength).map(mem.getOrElse(_, 0))
-    chisel3.iotesters.Driver(() => new DUT(BpfProg("test", insns)), backendType="firrtl")(new CircuitTester(_, result, steps, args._1, args._2, args._3, memContents)) shouldBe true
+    val memContents = (0 until MemLength).map(mem.getOrElse(_, MemInit))
+    chisel3.iotesters.Driver(
+      () => new DUT(Seq(progs, progs, progs)), backendType="firrtl")(
+      new CircuitTester(_, Seq.tabulate(3)(_ => result -> steps), args._1, args._2, args._3, memContents)
+    ) shouldBe true
   }
 
-  def compileAndTest(text: String, args: (BigInt, BigInt), result: BigInt, steps: Int, sparseMemContents: (Int, Int)*): Unit = {
+  def compileAndTest(textsAndResults: Seq[(String, BigInt)], args: (BigInt, BigInt), sparseMemContents: (Int, Int)*): Unit = {
+    val mem = sparseMemContents.toMap
+    val memContents = (0 until MemLength).map(mem.getOrElse(_, MemInit))
     val tempFile = Files.createTempFile("bpf", ".c")
     val fullText =
       s"""#include <stdint.h>
-        |
-        |int f(uint64_t x, uint64_t y) {
-        |  $text
-        |}
-      """.stripMargin
+        |volatile uint64_t a, b;
+        |uint64_t c, d;
+        |uint64_t *addr;
+        |""".stripMargin +
+        textsAndResults.zipWithIndex.map { case ((text, _), ind) =>
+          s"""
+            |int f$ind(uint64_t x, uint64_t y) {
+            |  $text
+            }
+          """.stripMargin
+        }.mkString
+    val results = textsAndResults.map(_._2)
     Files.write(tempFile, fullText.getBytes)
     val fname = tempFile.toAbsolutePath.toString
     Runtime.getRuntime
       .exec(Array("/bin/sh", "-c", s"clang -O3 -emit-llvm -c $fname -o - | llc -march=bpf -filetype=obj -o $fname.o"))
       .waitFor()
     val data = Files.readAllBytes(Paths.get(fname + ".o"))
-    val insns = BpfLoader.fetchProgs(ByteBuffer.wrap(data)).head.insns
-    testWith(insns: _*)((args._1, args._2, 0.bigint), result, steps, sparseMemContents: _*)
+    val progs = BpfLoader.fetchProgs(ByteBuffer.wrap(data))
+    chisel3.iotesters.Driver(
+      () => new DUT(progs.map(_.insns)), backendType="firrtl")(
+      new CircuitTester(_, results.map(_ -> -100), args._1, args._2, 0, memContents)
+    ) shouldBe true
     Files.delete(tempFile)
     Files.delete(Paths.get(tempFile.toString + ".o"))
   }
@@ -191,28 +246,54 @@ class CircuitConstructorSpec extends FlatSpec with Matchers {
 
   it should "load then store" in {
     testWith(
-      BpfInsn(0x71, 1, 1, 1,  Left(0)),    // r1 = *(uint8_t *)(r1 + 1)
-      BpfInsn(0x07, 1, 0, 0,  Left(0xab)), // r1 += 0xab
-      BpfInsn(0x73, 2, 1, 10, Left(0)),    // *(uint8_t *)(r2 + 10) = r1
+      BpfInsn(0x71, 1, 1, 1,  Left(0)),  // r1 = *(uint8_t *)(r1 + 1)
+      BpfInsn(0x07, 1, 0, 0,  Left(3)),  // r1 += 3
+      BpfInsn(0x73, 2, 1, 10, Left(0)),  // *(uint8_t *)(r2 + 10) = r1
     )((1, 2, 3), 0, 6,
-      12 -> 0xab
+      12 -> 0xad
     )
   }
 
   it should "handle byteswap2" in {
-    compileAndTest("return ((x & 0xFF) << 8) | ((x & 0xFF00) >> 8);",
-      (0xabcdef, 0x00), 0xefcd, 0)
+    compileAndTest(Seq("return ((x & 0xFF) << 8) | ((x & 0xFF00) >> 8);" -> 0xefcd),
+      (0xabcdef, 0x00))
   }
 
   it should "handle bytemerge2" in {
-    compileAndTest("return (x & 0xFF) | (y & 0xFF00);",
-      (0xabcdef, 0x123456), 0x34ef, 0)
+    compileAndTest(Seq("return (x & 0xFF) | (y & 0xFF00);" -> 0x34ef),
+      (0xabcdef, 0x123456))
   }
 
   it should "handle popcount" in {
-    compileAndTest("return __builtin_popcount(x);",
-      (0x10000020AA000011l, 0), 6, 0)
-    compileAndTest("return __builtin_popcountl(x);",
-      (0x10000020AA000011l, 0), 8, 0)
+    compileAndTest(Seq(
+      "return __builtin_popcount(x);" -> 6,
+      "return __builtin_popcountl(x);" -> 8),
+      (0x10000020AA000011l, 0))
+  }
+
+  it should "handle explicit register allocation" in {
+    compileAndTest(Seq("a = x; b = a * 2; a = b + 2; return a + b;" -> 6),
+      (1, 0))
+  }
+
+  it should "store registers between invocations" in {
+    compileAndTest(Seq.tabulate(3)(_ => "*(uint8_t*)(a + 1) += ++b; a += x; return 0;" -> 0),
+      (3, 0), 1 -> 0xab, 4 -> 0xac, 7 -> 0xad
+    )
+  }
+
+  it should "store registers between invocations (not volatile)" in {
+    compileAndTest(Seq.tabulate(3)(_ => "*(uint8_t*)(c + 1) += ++a; c += x; return 0;" -> 0),
+      (3, 0), 1 -> 0xab, 4 -> 0xac, 7 -> 0xad
+    )
+  }
+
+  it should "handle storing the pointer between funct-s" in {
+    compileAndTest(Seq(
+      "addr = (void *)x; return ((uint32_t)addr) << 1;" -> 16,
+      /* cannot perform not naturally fully ordered operations on a particular byte of memory, so "addr + 1" */
+      "*addr = (*addr) + 1; return (*(addr + 1)) & 0xFF;" -> 0xaa,
+      "addr += 2; return addr;" -> 24
+    ), (8, 0), 8 -> 0xab)
   }
 }

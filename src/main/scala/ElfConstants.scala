@@ -42,6 +42,8 @@ object ElfConstants {
     val SHT_STRTAB = 3
     val SHT_REL = 9
     val SHT_RELA = 4
+
+    val SHN_COMMON = 0xfff2.toShort
   }
 
   object Elf64_Sym {
